@@ -384,13 +384,48 @@ def _profiles_failed(errors: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
     }
 
 
+# FastAPI runs these sync handlers in ONE AnyIO worker pool shared by the whole API, 40 threads
+# wide (``anyio`` 4's default limiter). A refresh opens EVERY profile's state.db, so against a
+# multi-GB store a cold scan runs for tens of seconds -- far longer than the desktop's poll
+# interval. Parking a worker per overlapping poll is what took the gateway down (#140412): 36
+# workers queued on these locks, the pool ran dry, the uvicorn loop could no longer answer its own
+# liveness probe, and the shutdown watchdog exited 75 into a supervisor restart -- which the
+# desktop sees as "Timed out connecting to Hermes backend". So a caller that finds a refresh
+# already in flight serves the PREVIOUS scan rather than waiting for the new one, and only a
+# bounded few ever block. Serving a sidebar a little stale is always better than killing the
+# process that draws it.
+#
+# How long a superseded scan may still answer, while its replacement is in flight. Generous on
+# purpose: it has to outlast the slowest full fan-out, or waiters queue again and the pool drains.
+_SIDEBAR_STALE_GRACE_SECONDS = 120.0
+# Hard ceiling on workers blocked across ALL sidebar endpoints at once -- the pool they would
+# exhaust is shared, so the budget is too. Well under 40, leaving the rest of the API its threads.
+_SIDEBAR_MAX_WAITERS = 12
+# A blocked caller gives up rather than holding a worker for the whole of a slow scan.
+_SIDEBAR_REFRESH_WAIT_SECONDS = 20.0
+_SIDEBAR_WAITERS = threading.BoundedSemaphore(_SIDEBAR_MAX_WAITERS)
+_SIDEBAR_STALE_STATS = {"served": 0, "shed": 0}
+_SIDEBAR_STALE_STATS_LOCK = threading.Lock()
+
+
+def _sidebar_stale_stat(name):
+    with _SIDEBAR_STALE_STATS_LOCK:
+        _SIDEBAR_STALE_STATS[name] += 1
+
+
 def _sidebar_singleflight_cache(func):
-    """Coalesce concurrent sidebar scans and briefly reuse their response.
+    """Coalesce concurrent sidebar scans, reuse their response, and never queue the thread pool.
 
     Every uncached refresh opens every profile database; desktop poll bursts overlap identical
     scans in AnyIO worker threads, starving the uvicorn loop for the GIL. The TTL bounds UI
     staleness; the single-flight lock guarantees one expensive scan at a time. Cached values
     are copied on store and hit so serialization or a caller cannot mutate shared state.
+
+    A caller that arrives mid-refresh does NOT wait behind it while a recent enough answer
+    exists: it is served the superseded snapshot and returns its worker to the pool at once.
+    Only when there is nothing to serve -- a cold start -- does it block, and then only
+    ``_SIDEBAR_MAX_WAITERS`` of them, each for at most ``_SIDEBAR_REFRESH_WAIT_SECONDS``,
+    after which it sheds with a retryable 503 instead of holding a thread the gateway needs.
     """
     signature = inspect.signature(func)
     cache = OrderedDict()
@@ -403,9 +438,20 @@ def _sidebar_singleflight_cache(func):
         with cache_lock:
             item = cache.get(key)
             if item is None or now >= item[0]:
-                cache.pop(key, None)
+                # Deliberately NOT popped: past its TTL it stops being a cache hit, but it is
+                # still the newest answer there is, and `_stale` serves it while the refresh
+                # that supersedes it runs. The LRU bound below is what evicts it.
                 return miss
             cache.move_to_end(key)
+            return copy.deepcopy(item[1])
+
+    def _stale(key):
+        """The superseded snapshot, while it is young enough to stand in for a running scan."""
+        now = time.monotonic()
+        with cache_lock:
+            item = cache.get(key)
+            if item is None or now >= item[2] + _SIDEBAR_STALE_GRACE_SECONDS:
+                return miss
             return copy.deepcopy(item[1])
 
     @functools.wraps(func)
@@ -421,12 +467,11 @@ def _sidebar_singleflight_cache(func):
         if cached is not miss:
             return cached
 
-        # A plain Lock is intentional: FastAPI executes this sync handler in the AnyIO
-        # worker pool, so contenders sleep without holding the GIL.
-        with refresh_lock:
-            cached = _lookup(key)
-            if cached is not miss:
-                return cached
+        def _refresh():
+            """Run the scan under the held lock and publish it. Caller owns ``refresh_lock``."""
+            again = _lookup(key)
+            if again is not miss:
+                return again
             result = func(*args, **kwargs)
             # A 200 carrying errors[] is a FAILED profile scan, not a successful empty page.
             # Caching it would hold the empty recents in front of a store that has already
@@ -439,12 +484,61 @@ def _sidebar_singleflight_cache(func):
                 _log.exception("sidebar response could not be cached")
                 return result
             with cache_lock:
-                cache[key] = (time.monotonic() + ttl, snapshot)
+                now = time.monotonic()
+                cache[key] = (now + ttl, snapshot, now)
                 cache.move_to_end(key)
+                # Entries live past their TTL only to stand in for a running scan, so one that
+                # can no longer do that is dead weight -- these snapshots are whole project
+                # trees, and `_lookup` no longer pops them.
+                for dead in [k for k, item in cache.items()
+                             if k != key and now >= item[2] + _SIDEBAR_STALE_GRACE_SECONDS]:
+                    cache.pop(dead, None)
                 while len(cache) > _SIDEBAR_CACHE_MAX_ENTRIES:
                     cache.popitem(last=False)
             return result
 
+        # A plain Lock is intentional: FastAPI executes this sync handler in the AnyIO
+        # worker pool, so contenders sleep without holding the GIL. Taken WITHOUT blocking --
+        # whoever misses it must not sit on a worker thread while the scan runs.
+        if refresh_lock.acquire(blocking=False):
+            try:
+                return _refresh()
+            finally:
+                refresh_lock.release()
+
+        # A refresh is already running. Prefer the answer it is about to replace over the
+        # worker thread it would cost to wait for the new one.
+        stale = _stale(key)
+        if stale is not miss:
+            _sidebar_stale_stat("served")
+            return stale
+
+        # Nothing to serve -- a cold start, so this caller does have to wait for the scan. Only
+        # a bounded number may, and never for longer than one scan's worth of patience.
+        if not _SIDEBAR_WAITERS.acquire(blocking=False):
+            _sidebar_stale_stat("shed")
+            raise HTTPException(status_code=503, detail="sidebar scan in progress, retry",
+                                headers={"Retry-After": "1"})
+        try:
+            if not refresh_lock.acquire(timeout=_SIDEBAR_REFRESH_WAIT_SECONDS):
+                served = _stale(key)
+                if served is not miss:
+                    _sidebar_stale_stat("served")
+                    return served
+                _sidebar_stale_stat("shed")
+                raise HTTPException(status_code=503, detail="sidebar scan in progress, retry",
+                                    headers={"Retry-After": "1"})
+            try:
+                return _refresh()
+            finally:
+                refresh_lock.release()
+        finally:
+            _SIDEBAR_WAITERS.release()
+
+    # Test seam, in the style of ``_sidebar_profile_cache_clear``: the retention rules below are
+    # about what the cache HOLDS, not just what it answers, and that is otherwise unobservable.
+    wrapped._sidebar_cache = cache
+    wrapped._sidebar_refresh_lock = refresh_lock
     return wrapped
 
 

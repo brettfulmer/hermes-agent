@@ -9,6 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
+from fastapi import HTTPException
+
 from hermes_cli.web_routers import profiles
 
 
@@ -163,6 +165,130 @@ class SidebarCacheTests(unittest.TestCase):
 
         with mock.patch.object(profiles, "_SIDEBAR_CACHE_TTL_SECONDS", 0.0):
             self.assertEqual((scan(), scan()), (1, 2))
+
+    def test_a_poll_arriving_mid_refresh_is_served_the_previous_scan(self):
+        """The fix for #140412. A refresh opens every profile's state.db, so against a multi-GB
+        store it outruns the desktop's poll interval by a long way. Waiting for it costs an AnyIO
+        worker, the pool is 40 wide for the whole API, and 36 parked workers starved the uvicorn
+        loop until the shutdown watchdog exited 75 -- which the desktop reports as a disconnect.
+        So a poll that lands mid-refresh answers from the scan being replaced and returns its
+        worker immediately."""
+        clock = [1000.0]
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+
+        @profiles._sidebar_singleflight_cache
+        def scan():
+            calls.append(None)
+            if len(calls) > 1:  # only the second scan is the slow one being overtaken
+                entered.set()
+                self.assertTrue(release.wait(timeout=10))
+            return {"generation": len(calls)}
+
+        before = profiles._SIDEBAR_STALE_STATS["served"]
+        # Patching time.monotonic also patches it for this test body, so wall-clock
+        # assertions below use perf_counter. threading.Event is unaffected either way.
+        with mock.patch.object(profiles.time, "monotonic", lambda: clock[0]):
+            self.assertEqual(scan(), {"generation": 1})
+            clock[0] += profiles._SIDEBAR_CACHE_TTL_SECONDS + 1.0  # the TTL lapses
+            slow = threading.Thread(target=scan, daemon=True)
+            slow.start()
+            self.assertTrue(entered.wait(timeout=10), "the second scan must be in flight")
+            started = time.perf_counter()
+            served = scan()
+            elapsed = time.perf_counter() - started
+            release.set()
+            slow.join(timeout=10)
+
+        self.assertEqual(served, {"generation": 1},
+                         "the superseded scan must answer while its replacement runs")
+        self.assertLess(elapsed, 1.0, "a mid-refresh poll must not park a worker thread")
+        self.assertEqual(len(calls), 2, "and must not start a third scan of its own")
+        self.assertEqual(profiles._SIDEBAR_STALE_STATS["served"], before + 1)
+
+    def test_a_caller_with_nothing_to_serve_sheds_rather_than_hold_a_worker(self):
+        """Cold start, scan already running, waiter budget gone: the pool matters more than this
+        one response, so it sheds with a retryable 503 instead of blocking."""
+        entered, release = threading.Event(), threading.Event()
+
+        @profiles._sidebar_singleflight_cache
+        def scan():
+            entered.set()
+            self.assertTrue(release.wait(timeout=10))
+            return {"rows": []}
+
+        exhausted = threading.BoundedSemaphore(1)
+        self.assertTrue(exhausted.acquire(blocking=False))
+        holder = threading.Thread(target=scan, daemon=True)
+        holder.start()
+        try:
+            self.assertTrue(entered.wait(timeout=10))
+            before = profiles._SIDEBAR_STALE_STATS["shed"]
+            with mock.patch.object(profiles, "_SIDEBAR_WAITERS", exhausted):
+                started = time.perf_counter()
+                with self.assertRaises(HTTPException) as caught:
+                    scan()
+                elapsed = time.perf_counter() - started
+        finally:
+            release.set()
+            holder.join(timeout=10)
+
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(caught.exception.headers.get("Retry-After"), "1")
+        self.assertLess(elapsed, 1.0, "shedding must be immediate, not a timed-out wait")
+        self.assertEqual(profiles._SIDEBAR_STALE_STATS["shed"], before + 1)
+
+    def test_a_snapshot_too_old_to_stand_in_is_not_served(self):
+        """The grace window is what keeps 'stale' honest: past it the entry stops answering, so a
+        gateway that has been wedged for an hour cannot keep handing back an hour-old sidebar."""
+        clock = [1000.0]
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+
+        @profiles._sidebar_singleflight_cache
+        def scan():
+            calls.append(None)
+            if len(calls) > 1:
+                entered.set()
+                self.assertTrue(release.wait(timeout=10))
+            return {"generation": len(calls)}
+
+        exhausted = threading.BoundedSemaphore(1)
+        self.assertTrue(exhausted.acquire(blocking=False))
+        with mock.patch.object(profiles.time, "monotonic", lambda: clock[0]):
+            self.assertEqual(scan(), {"generation": 1})
+            clock[0] += profiles._SIDEBAR_STALE_GRACE_SECONDS + 1.0
+            slow = threading.Thread(target=scan, daemon=True)
+            slow.start()
+            try:
+                self.assertTrue(entered.wait(timeout=10))
+                with mock.patch.object(profiles, "_SIDEBAR_WAITERS", exhausted):
+                    with self.assertRaises(HTTPException) as caught:
+                        scan()
+            finally:
+                release.set()
+                slow.join(timeout=10)
+
+        self.assertEqual(caught.exception.status_code, 503,
+                         "an expired-past-grace entry must not be served as a stand-in")
+
+    def test_entries_past_the_grace_window_are_dropped_on_the_next_store(self):
+        """`_lookup` stopped popping expired entries so they can stand in for a running scan;
+        these snapshots are whole project trees, so the ones that can no longer do that have to
+        go, or the cache just accumulates them."""
+        clock = [1000.0]
+
+        @profiles._sidebar_singleflight_cache
+        def scan(profile="all"):
+            return {"profile": profile}
+
+        with mock.patch.object(profiles.time, "monotonic", lambda: clock[0]):
+            scan(profile="one")
+            clock[0] += profiles._SIDEBAR_STALE_GRACE_SECONDS + 1.0
+            scan(profile="two")
+
+        self.assertEqual([dict(key)["profile"] for key in scan._sidebar_cache], ["two"],
+                         "the entry too old to stand in for a scan must not be retained")
 
     def test_preserves_fastapi_signature(self):
         def scan(profile: str = "all", limit: int = 20):
