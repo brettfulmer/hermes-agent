@@ -495,7 +495,15 @@ def collect_unheld_api_images(db):
 
     Candidates are enumerated from the ACTIVE home's media root while ownership is decided by
     ``db``: a sweep whose database belongs to another profile would see every image here as
-    unowned, so it collects nothing."""
+    unowned, so it collects nothing.
+
+    This is the disk-driven backstop for orphans ``retire_media`` never recorded, so unlike
+    ``collect_retired_media`` it cannot skip itself when no candidate is queued: every API image
+    on disk is a candidate every time. What it can skip is the proof. A candidate whose witness
+    row still names it is retained on a primary-key lookup, and the messages pass runs only for
+    candidates that proof does not cover — which is only ever a candidate about to be deleted, or
+    one seen for the first time. A store whose images are all still named scans nothing, so this
+    no longer costs a full ``instr()`` pass over every transcript row on each gateway start-up."""
     from hermes_constants import get_hermes_home
     if Path(db.db_path).resolve().parent != get_hermes_home().resolve():
         logger.warning(
@@ -503,9 +511,24 @@ def collect_unheld_api_images(db):
         return 0
     root = _media_root()
     try:
-        return release_unheld_media(db, [
+        candidates = [
             {'path': str(path), 'sha256': path.parent.name} for path in (root.glob('*/api_*') if root.is_dir() else ())
-            if _API_IMAGE_NAME.fullmatch(path.name) and path.name[4:36] == path.parent.name[:32]])
+            if _API_IMAGE_NAME.fullmatch(path.name) and path.name[4:36] == path.parent.name[:32]]
+        if not candidates:
+            return 0
+        with db._read_ctx() as conn:
+            # Point reads, deliberately outside a transaction: holding one open here would pin the
+            # WAL for the whole sweep, and an answer torn between the two reads only ever falls
+            # through to the scan below.
+            unproven = _witnessed_retained(conn, candidates)[1]
+        if not unproven:
+            return 0
+        witnesses, digests = {}, {reference['path']: reference['sha256'] for reference in unproven}
+        released = release_unheld_media(db, unproven, witnesses=witnesses)
+        _save_witnesses(db, {digests[path]: message_id for path, message_id in witnesses.items()
+                             if path in digests},
+                        [digest for path, digest in digests.items() if path not in witnesses])
+        return released
     except sqlite3.DatabaseError:
         # Callers run after a committed delete or during startup recovery: neither may fail on it.
         # ``DatabaseError`` also covers a corrupt store, not only ``OperationalError`` (locked, limits).
@@ -513,28 +536,103 @@ def collect_unheld_api_images(db):
         return 0
 
 
+def _row_text(content):
+    return '' if content is None else (
+        content.decode('utf-8', 'replace') if isinstance(content, bytes) else str(content))
+
+
+def _reference_needles(reference):
+    """Every spelling a transcript row can carry for one reference's content-addressed tail.
+
+    ``<sha256>/<name>`` with either separator, raw and JSON-escaped, so each spelling a note can
+    carry (the host path, a sandbox backend's ``to_agent_visible_cache_path``) counts as a mention.
+    ONE definition, because the scan and ``_witnessed_retained`` must agree on what "mentioned"
+    means: were the witness check the looser of the two it would retain bytes the scan would free,
+    and were it the stricter it would free bytes a transcript still names."""
+    tails = [reference['sha256'] + sep + Path(reference['path']).name for sep in ('/', '\\')]
+    return [*tails, *(json.dumps(tail)[1:-1] for tail in tails)]
+
+
 def _history_mentions(conn, references, after_id=0):
-    """Candidate paths any transcript row (id > after_id) mentions raw or JSON-escaped, in ONE
-    messages pass. Rows are prefiltered in SQL on the literal text before each candidate's digest
-    directory, so only rows that could name a candidate reach Python's exact substring test."""
-    # Matched by the content-addressed tail ``<sha256>/<name>`` with either separator, so every
-    # spelling a note can carry (the host path, a sandbox backend's ``to_agent_visible_cache_path``)
-    # counts as a mention.
-    needles = {}
-    for reference in references:
-        raw = reference['path']
-        for tail in (reference['sha256'] + sep + Path(raw).name for sep in ('/', '\\')):
-            needles[tail] = needles[json.dumps(tail)[1:-1]] = raw
+    """Candidate paths any transcript row (id > after_id) mentions raw or JSON-escaped, mapped to
+    the id of one row that named each, in ONE messages pass. Rows are prefiltered in SQL on the
+    literal text before each candidate's digest directory, so only rows that could name a candidate
+    reach Python's exact substring test. The ids are the witnesses ``_witnessed_retained`` replays,
+    so a later sweep can confirm the same answer without this pass."""
+    needles = {needle: reference['path']
+               for reference in references for needle in _reference_needles(reference)}
     prefixes = sorted({reference['sha256'] for reference in references})
     # The digests are ONE bound JSON array, never one ``instr`` term each: the statement's size
     # must not grow with the candidate count (SQLite's expression-depth limit fails at ~1000 terms).
-    query = ('WITH digests(value) AS MATERIALIZED (SELECT value FROM json_each(?)) SELECT content FROM messages '
+    query = ('WITH digests(value) AS MATERIALIZED (SELECT value FROM json_each(?)) SELECT id, content FROM messages '
              'WHERE EXISTS (SELECT 1 FROM digests WHERE instr(content, digests.value))' + (' AND id>?' if after_id else ''))
-    mentioned = set()
-    for (content,) in conn.execute(query, (json.dumps(prefixes), *((after_id,) if after_id else ()))):
-        text = content.decode('utf-8', 'replace') if isinstance(content, bytes) else str(content)
-        mentioned.update(raw for needle, raw in needles.items() if needle in text)
+    mentioned = {}
+    for row_id, content in conn.execute(query, (json.dumps(prefixes), *((after_id,) if after_id else ()))):
+        text = _row_text(content)
+        for needle, raw in needles.items():
+            if needle in text:
+                mentioned.setdefault(raw, row_id)
     return mentioned
+
+
+_WITNESS_PREFIX = 'gateway.media.apiwitness.v1.'
+
+
+def _witnessed_retained(conn, references):
+    """Split references into (retained, unproven) by the witness recorded for each digest.
+
+    A witness is the id of one transcript row that named the image. Confirming it is a primary-key
+    lookup, so a sweep whose every candidate is still named costs one probe per candidate and NO
+    messages pass. That is the whole point: a retained API image stays named for as long as the
+    chat exists, while the pass is an unindexable ``instr()`` scan of every row (153 MB on the live
+    store) that ran on every gateway start-up and blocked the event loop right through it.
+
+    The cache can only ever RETAIN. A missing witness row, a message since deleted, or content
+    rewritten to drop the mention (``session_results``, ``transcript_repair`` both rewrite
+    ``content`` in place) all fall through to the scan, so nothing is deleted on a cached answer:
+    a stale witness costs disk until the next real pass, never data.
+
+    Two statements whatever the candidate count: a primary-key range over the witness keys, then
+    the witness rows bound as ONE JSON array. Neither grows with the candidates, because a store
+    can hold a thousand retained images and SQLite's variable and expression limits bite at ~999
+    (#140090)."""
+    from hermes_state_keys import prefix_range
+    witnessed = {}
+    for key, value in conn.execute('SELECT key,value FROM state_meta WHERE key>=? AND key<?',
+                                   prefix_range(_WITNESS_PREFIX)):
+        if value is not None and str(value).isdigit():
+            witnessed[str(key)[len(_WITNESS_PREFIX):]] = int(value)
+    wanted = sorted({witnessed[reference['sha256']] for reference in references
+                     if reference['sha256'] in witnessed})
+    rows = {row[0]: row[1] for row in conn.execute(
+        'SELECT id, content FROM messages WHERE id IN (SELECT value FROM json_each(?))',
+        (json.dumps(wanted),))} if wanted else {}
+    retained, unproven = [], []
+    for reference in references:
+        text = _row_text(rows.get(witnessed.get(reference['sha256'])))
+        (retained if any(needle in text for needle in _reference_needles(reference))
+         else unproven).append(reference)
+    return retained, unproven
+
+
+def _save_witnesses(db, proven, forgotten):
+    """Record one naming row per retained image and forget the digests this sweep could not prove,
+    so ``state_meta`` carries a witness only for images still on disk and still named.
+
+    A digest proven by one file is never forgotten because of another: one directory can hold two
+    spellings of the same digest (``.png`` and ``.jpg`` both satisfy the candidate name), and
+    dropping the witness there would only buy a needless scan next time."""
+    writes = [(_WITNESS_PREFIX + digest, str(message_id)) for digest, message_id in proven.items()]
+    drops = [(_WITNESS_PREFIX + digest,) for digest in forgotten if digest not in proven]
+    if not writes and not drops:
+        return
+    def write(conn):
+        if writes:
+            conn.executemany('INSERT INTO state_meta(key,value) VALUES(?,?) '
+                             'ON CONFLICT(key) DO UPDATE SET value=excluded.value', writes)
+        if drops:
+            conn.executemany('DELETE FROM state_meta WHERE key=?', drops)
+    db._execute_write(write)
 
 
 def _collectable(references, root):
@@ -542,18 +640,22 @@ def _collectable(references, root):
             and Path(reference['path']).parent.name == reference['sha256'] and Path(reference['path']).exists()]
 
 
-def release_unheld_media(db, references, *, retain_history=True):
+def release_unheld_media(db, references, *, retain_history=True, witnesses=None):
     """Delete unowned references, preserving accepted admission and retained transcript owners.
 
     The history owner check is one read-snapshot pass over messages, outside the write lock; under
     the lock only rows inserted after that snapshot (an indexed id range) are re-checked. A new
     transcript mention of a retained image comes from an admission holding it (re-checked under the
-    lock) or from a copied row (branch/compress insert, caught by the range)."""
+    lock) or from a copied row (branch/compress insert, caught by the range).
+
+    ``witnesses``, when a dict, collects ``{path: message_id}`` for every reference a pass here
+    found mentioned, so the caller can record what this scan proved and confirm it next time
+    without repeating the scan (see ``_witnessed_retained``)."""
     root = _media_root()
     references = _collectable(references or (), root)
     if not references:
         return 0
-    seen, last_id = set(), 0
+    seen, last_id = {}, 0
     if retain_history:
         with db._read_ctx() as conn:
             conn.execute('BEGIN')  # one snapshot: the id watermark and the scan agree
@@ -563,6 +665,8 @@ def release_unheld_media(db, references, *, retain_history=True):
             finally:
                 if conn.in_transaction:
                     conn.execute('ROLLBACK')
+        if witnesses is not None:
+            witnesses.update(seen)
         references = [reference for reference in references if reference['path'] not in seen]
         if not references:
             return 0
@@ -572,7 +676,10 @@ def release_unheld_media(db, references, *, retain_history=True):
         if identities is None:
             return 0
         if retain_history:
-            held |= _history_mentions(conn, references, after_id=last_id)
+            recent = _history_mentions(conn, references, after_id=last_id)
+            if witnesses is not None:
+                witnesses.update(recent)
+            held.update(recent)
         released = 0
         for reference in references:
             path = Path(reference['path'])
