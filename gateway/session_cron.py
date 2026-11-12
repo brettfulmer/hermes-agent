@@ -143,9 +143,12 @@ def _create(authority, actor, params):
     route = authority.runner.session_store._generate_session_key(source)
     now = _now()
     entry = SessionEntry(route, sid, now, now, origin=source, platform=Platform.LOCAL)
+    # Stamp job_id onto the entry so every cron session carries a durable link back to its job.
+    entry_dict = entry.to_dict()
+    entry_dict['cron_job_id'] = jid
     # The staged creation receipt: ``operation('submit')`` commits it off the owner loop.
     return {'profile_id': authority.profile_id, 'principal_id': actor.subject, 'request_id': request_id,
-            'session_id': sid, 'route': route, 'entry': entry.to_dict(), 'policy': asdict(policy)}, request_id
+            'session_id': sid, 'route': route, 'entry': entry_dict, 'policy': asdict(policy)}, request_id
 
 
 # What a message typed into a scheduled job's session settles with (see ``execute``); its text is

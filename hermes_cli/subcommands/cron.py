@@ -215,6 +215,11 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_runs.add_argument("job_id", nargs="?", help="Optional job ID filter")
     cron_runs.add_argument("--limit", type=int, default=20, help="Rows to show (1-500)")
 
+    # cron cost — per-job spend from state.db session_model_usage
+    cron_cost = cron_subparsers.add_parser(
+        "cost", help="Show per-job cost for enabled cron jobs")
+    cron_cost.add_argument("--days", type=int, default=7, help="Count back N days (default: 7)")
+
     # cron incidents — durable failure incidents (list/ack)
     cron_incidents = cron_subparsers.add_parser(
         "incidents", help="List or acknowledge durable cron failure incidents")

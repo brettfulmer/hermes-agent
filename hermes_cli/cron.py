@@ -994,6 +994,127 @@ def cron_notepad(args) -> int:
         return 1
 
 
+def _format_cost(usd: float) -> str:
+    """Render a cost in USD compactly."""
+    if usd < 0.005:
+        return "$0.00"
+    return f"${usd:.2f}"
+
+
+def cron_cost(args) -> int:
+    """Show per-job spend for enabled cron jobs over the last N days."""
+    from datetime import datetime, UTC, timedelta
+    try:
+        import sqlite3
+    except ImportError:
+        print(color("sqlite3 unavailable", Colors.RED))
+        return 1
+
+    days = getattr(args, "days", 7)
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).timestamp()
+
+    from hermes_constants import get_hermes_home
+    home = get_hermes_home()
+    state_path = home / "state.db"
+
+    if not state_path.exists():
+        print(color("No state.db found — no cron sessions to report.", Colors.DIM))
+        return 0
+
+    # Build job lookup: id -> name mapping using list_jobs().
+    try:
+        from cron.jobs import list_jobs as _list_jobs
+        all_jobs = _list_jobs(include_disabled=True) or []
+    except Exception:
+        all_jobs = []
+
+    enabled_jobs: list[dict] = []
+    job_info: dict[str, str] = {}
+    for job in all_jobs:
+        jid = job.get("id") or ""
+        jname = job.get("name") or jid
+        job_info[jid] = jname
+        if job.get("enabled", True):
+            enabled_jobs.append(job)
+
+    if not enabled_jobs:
+        print(color("No enabled cron jobs found.", Colors.DIM))
+        return 0
+
+    # Query per-job costs from state.db.
+    # Uses the stamped cron_job_id column (new runs), falling back to legacy
+    # session-id prefix parsing via SQL CASE expression for older runs.
+    query = """
+        SELECT
+            COALESCE(
+                s.cron_job_id,
+                CASE WHEN s.id LIKE 'cron_%' THEN REPLACE(REPLACE(SUBSTR(s.id, 7), '_', ' '), '_', '') END
+            ) AS job_id,
+            COALESCE(SUM(COALESCE(s.actual_cost_usd, s.estimated_cost_usd, 0)), 0) AS total_cost,
+            COUNT(*) AS run_count
+        FROM sessions s
+        WHERE s.source = 'cron'
+          AND s.started_at >= ?
+        GROUP BY job_id
+        ORDER BY total_cost DESC
+    """
+
+    try:
+        conn = sqlite3.connect(str(state_path))
+        rows = list(conn.execute(query, (cutoff,)).fetchall())
+        conn.close()
+    except Exception as exc:
+        print(color(f"Failed to read state.db: {exc}", Colors.RED))
+        return 1
+
+    # Map raw job_ids from query → human-readable names.
+    seen_ids: set[str] = set()
+    cost_rows: list[tuple[str, float, int]] = []
+    for raw_id, cost, count in rows:
+        rid = raw_id or ""
+        seen_ids.add(rid)
+        cost_rows.append((rid, cost, count))
+
+    def _resolve_name(raw_id: str) -> str:
+        if not raw_id:
+            return "?"
+        name = job_info.get(raw_id)
+        if name:
+            return name
+        for _jid, jname in job_info.items():
+            if jname == raw_id:
+                return jname
+        return raw_id
+
+    header = f"{'Job':<30} {'Cost':>10}  Runs"
+
+    if not cost_rows:
+        print(f"Cron costs (last {days} day{'s' if days != 1 else ''}): none yet.")
+        print(header)
+        print(f"{'─' * len(header)}")
+        for j in sorted(enabled_jobs, key=lambda j: j.get("name", j.get("id", ""))):
+            print(f"{j.get('name', j.get('id','?')):<30} {_format_cost(0.0):>10}   0")
+        return 0
+
+    print(f"Cron costs (last {days} day{'s' if days != 1 else ''}):")
+    print(header)
+    print(f"{'─' * len(header)}")
+
+    for rid, cost, count in cost_rows:
+        name = _resolve_name(rid)
+        print(f"{name:<30} {_format_cost(cost):>10}  {count}")
+
+    zero_added = False
+    for j in sorted(enabled_jobs, key=lambda j: j.get("name", j.get("id", ""))):
+        jid = j.get("id", "")
+        if jid and jid not in seen_ids:
+            if not zero_added:
+                zero_added = True
+            print(f"{j.get('name', jid):<30} {_format_cost(0.0):>10}  0")
+
+    return 0
+
+
 def cron_cancel(args) -> int:
     """Stop a job's live run. The schedule is untouched — the next fire still happens."""
     result = _cron_api(action="cancel", job_id=args.job_id,
@@ -1027,6 +1148,7 @@ _CRON_SUBCOMMANDS = {
     "resume": lambda a: cron_resume(a),
     "run": lambda a: _job_action("run", a.job_id, "Triggered"),
     "cancel": lambda a: cron_cancel(a),
+    "cost": lambda a: cron_cost(a),
     "remove": lambda a: _job_action("remove", a.job_id, "Removed"),
 }
 _CRON_SUBCOMMANDS["history"] = _CRON_SUBCOMMANDS["runs"]
