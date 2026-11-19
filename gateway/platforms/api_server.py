@@ -2110,73 +2110,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self, runtime_kwargs: dict[str, Any], model: str, *, requested_model: Optional[str],
         requested_provider: Optional[str], route: Optional[dict[str, Any]], session_model: Optional[str],
         confirmed_runtime_lock: bool, gateway_session_key: Optional[str], session_id: Optional[str]) -> tuple:
-        """Apply the model/provider precedence chain for one agent (mutates ``runtime_kwargs``):
-        confirmed Browser lock > session ``/model`` override > session-persisted model >
-        model_routes alias > per-request provider/model > global defaults. A confirmed lock
-        bypasses the override and fails closed if its provider cannot be resolved.
-        Returns ``(model, session_override, request_model, request_provider)``."""
-        request_model = _clean_request_string(requested_model)
-        request_provider = _clean_request_string(requested_provider)
-        route_cfg = route if isinstance(route, dict) else {}
-        route_model = _clean_request_string(route_cfg.get("model"))
-        route_provider = _clean_request_string(route_cfg.get("provider"))
-        session_key = gateway_session_key or session_id
-        session_row_model = _clean_request_string(session_model)
-        current_provider = _clean_request_string(runtime_kwargs.get("provider"))
-        session_override = None if confirmed_runtime_lock else self._session_model_override_for(session_key)
-        # Model-string precedence (override > session-persisted > global) is owned by
-        # hermes_cli.model_switch.resolve_effective_model.
-        from hermes_cli.model_switch import resolve_effective_model
-        if session_override:
-            model = resolve_effective_model(session_override, None, model)
-            self._apply_provider_runtime(
-                runtime_kwargs,
-                _clean_request_string(session_override.get("provider")) or current_provider,
-                target_model=model)
-            _apply_runtime_agent_overrides(runtime_kwargs, session_override)
-            if route or request_model or request_provider:
-                logger.debug(
-                    "api_server request selection skipped: session /model override wins for %s",
-                    session_key or "")
-        elif session_row_model and not confirmed_runtime_lock:
-            # A session-persisted raw model (no route alias) is a standing selection that pins
-            # this session's turns ahead of per-request body values.
-            self._apply_provider_runtime(
-                runtime_kwargs, current_provider, target_model=session_row_model)
-            model = resolve_effective_model(None, session_row_model, model)
-            if request_model or request_provider:
-                logger.debug(
-                    "api_server request selection skipped: session-persisted model wins for %s",
-                    session_key or "")
-        else:
-            # The request's ``model`` selected the route, so its value is the ALIAS — never a
-            # model name; a route with no ``model`` key keeps the global default.
-            effective_model = (route_model or model) if route is not None else (request_model or model)
-            effective_provider = request_provider or route_provider or current_provider
-            applied = False
-            if effective_provider and (bool(request_provider or route_provider) or effective_model != model):
-                # A confirmed Browser lock fails closed: never fall through to the previous
-                # global provider's credentials.
-                applied = self._apply_provider_runtime(
-                    runtime_kwargs, effective_provider, target_model=effective_model,
-                    required=bool(request_provider) or confirmed_runtime_lock)
-            if not applied and effective_provider and effective_provider != current_provider:
-                runtime_kwargs["provider"] = effective_provider
-            model = effective_model
-            # Per-route explicit transport secrets/base URLs win after provider resolution.
-            from hermes_cli import codex_cli_access
-            if runtime_kwargs.get("provider") == "openai-codex" and codex_cli_access.selected():
-                codex_cli_access.resolve(explicit_api_key=route_cfg.get("api_key"), explicit_base_url=route_cfg.get("base_url"))
-            for key in ("api_key", "base_url"):
-                value = _clean_request_string(route_cfg.get(key))
-                if value:
-                    runtime_kwargs[key] = value
-            if route:
-                logger.debug(
-                    "api_server request selection applied: model=%s provider=%s route_provider=%s request_provider=%s",
-                    model, runtime_kwargs.get("provider"), route_provider or "", request_provider or "")
-        model = self._recover_or_record_model(model, runtime_kwargs, gateway_session_key)
-        return model, session_override, request_model, request_provider
+        from gateway.platforms.api_server_runtime_selection import _select_agent_runtime as select
+        from hermes_cli import codex_cli_access
+        result = select(self, runtime_kwargs, model, requested_model=requested_model, requested_provider=requested_provider,
+                        route=route, session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
+                        gateway_session_key=gateway_session_key, session_id=session_id)
+        codex_cli_access.validate_transport(api_key=runtime_kwargs.get("api_key"), base_url=runtime_kwargs.get("base_url"),
+                                            provider=runtime_kwargs.get("provider"))
+        return result
 
     def _create_agent(
         self, ephemeral_system_prompt: Optional[str] = None, session_id: Optional[str] = None,

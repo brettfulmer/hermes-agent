@@ -73,7 +73,8 @@ def for_existing_access(previous: str, *, base_url=None) -> dict[str, Any]:
     if previous and previous != current["api_key"]:
         def identity(token):
             claims = _decode_jwt_claims(token)
-            account = (claims.get("https://api.openai.com/auth") or {}).get("chatgpt_account_id")
+            auth = claims.get("https://api.openai.com/auth") or {}
+            account = auth.get("chatgpt_account_id") if isinstance(auth, dict) else None
             return (claims.get("sub"), account)
         old, new = identity(previous), identity(current["api_key"])
         if not all(isinstance(v, str) and v for v in old + new) or old != new:
@@ -94,3 +95,9 @@ def validate_transport(*, api_key, base_url, provider=None) -> None:
         if not isinstance(api_key, str) or not api_key.strip():
             raise _codex_err("CLI-owned Codex access is missing; no environment credential was substituted.", "codex_cli_auth_unavailable", relogin=True)
         for_existing_access(api_key, base_url=base_url)
+
+
+def validate_route(route: dict, runtime: dict) -> None:
+    """Check only route overrides actually applied by the native API precedence chain."""
+    if runtime.get("provider") == "openai-codex" and selected():
+        resolve(explicit_api_key=route.get("api_key"), explicit_base_url=route.get("base_url"))

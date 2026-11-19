@@ -580,9 +580,10 @@ class ClientLifecycleMixin:
             return False
         from hermes_cli import codex_cli_access
         if self.provider == "openai-codex" and codex_cli_access.selected():
+            from hermes_cli.auth_constants import AuthError
             try:
                 creds = codex_cli_access.for_existing_access(str(self.api_key or ""), base_url=self.base_url)
-            except Exception:
+            except AuthError:
                 return False
             if creds["api_key"] == self.api_key:
                 return False

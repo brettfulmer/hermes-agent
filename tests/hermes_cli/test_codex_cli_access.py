@@ -180,6 +180,13 @@ def test_actual_api_route_selection_rejects_post_resolution_endpoint_override(cl
         APIServerAdapter._select_agent_runtime(actor, {"provider": "openai-codex", "api_key": token}, "gpt-6-sol",
             requested_model=None, requested_provider=None, route={"provider": "openai-codex", "model": "gpt-6-sol", "base_url": "https://other.example"},
             session_model=None, confirmed_runtime_lock=False, gateway_session_key=None, session_id="fixture")
+    # An explicit lock ignores a stale route. Its unused override must not veto that lock.
+    current = {"provider": "openai-codex", "api_key": token, "base_url": DEFAULT_CODEX_BASE_URL}
+    result = APIServerAdapter._select_agent_runtime(actor, current, "gpt-6-sol", requested_model="gpt-6.2", requested_provider="openai-codex",
+        route={"provider": "openai-codex", "model": "stale-route-model", "base_url": "https://unused.example"}, session_model=None,
+        confirmed_runtime_lock=True, gateway_session_key=None, session_id="fixture")
+    assert current["base_url"] == DEFAULT_CODEX_BASE_URL
+    assert result[0] == "gpt-6.2"
 
 
 def test_final_main_and_auxiliary_client_factories_refuse_foreign_destination(cli_source):
