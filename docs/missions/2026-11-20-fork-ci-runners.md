@@ -44,3 +44,30 @@ failed only on the preserved untracked fixture binary; candidate-artifact checks
 passed without changing or including that fixture.
 
 Remote CI runner assignment and final CI results remain pending publication.
+
+## Follow-up: measured first-run failures
+
+Published head `a7903ad79f3ff5bd8c108724fd9a60ca33a22cfe` ran on standard
+GitHub runners. Docker `44540373223` and Nix `44540373133` passed. CI
+`44540373371` failed its real aggregate gate. The obsolete prior run's queued
+Blacksmith aggregate required a specifically authorised force-cancel after normal
+cancellation failed; current-head gates were preserved.
+
+Root extended the repair scope to contributor attribution, the missing Codex
+credential-source documentation, Windows Git lookup, and suspended-process test
+synchronisation. Prepared fixes retain all test selectors and safety assertions.
+GitHub annotations confirm the three Python slices and JS job exceeded their
+30-minute limits; the slowest Python slice reached 74%. Fork-only 60-minute job
+budgets and serial JS workspace scheduling address the measured smaller-runner
+capacity. Per-test deadlines are unchanged. macOS ARM jobs could not acquire a
+runner; GitHub explicitly reported hosted ARM capacity constraints.
+
+Native focused evidence: docs drift 2 passed; containment 8 passed; managed lookup
+guard 8 passed; Git unit/live suites 11 passed with one platform skip. The two
+new Git invariants fail on detached baseline `eaac327fac2c` and pass on the patch.
+Contributor mapping passes its canonical guard. The Linux compression/restart FIFO
+journey reproduces both failures on baseline `eaac327fac2c`, at the same
+`FOLLOWER_1` transcript assertion as current CI. Root-cause investigation remains
+open; no gateway behaviour was changed. Independent review returned SHIP. The
+17-check run passed 15 checks but two exhausted host memory; both failed checks
+passed on isolated canonical reruns. Publication and new remote checks remain pending.

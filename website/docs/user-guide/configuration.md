@@ -73,6 +73,27 @@ cannot override, via a system-level managed directory. See
 [Managed Scope](./managed-scope.md).
 :::
 
+## Existing Codex CLI session
+
+`codex_oauth.credential_source` selects the credential owner for the
+`openai-codex` provider. The default, `hermes`, keeps Hermes' independent OAuth
+store. Set `codex_cli` explicitly in the relevant profile's `config.yaml` to use
+an existing Codex CLI ChatGPT session:
+
+```yaml
+codex_oauth:
+  credential_source: codex_cli
+```
+
+The CLI continues to own its login and refresh grant. Hermes reads only the current
+access session from `$CODEX_HOME/auth.json`, or `~/.codex/auth.json` when
+`CODEX_HOME` is unset; it does not copy or refresh the grant or fall back to
+another credential. Keep the official Codex endpoint and remove API-key or
+transport overrides. A missing, expired or mismatched session fails with a login
+instruction. Reopen Codex or run `codex login`, then retry the same task. Hermes
+retains its native conversation and tool loop. This setting does not select a
+different provider or model.
+
 ## Runtime Limits
 
 Long-running Hermes server surfaces (including the gateway and

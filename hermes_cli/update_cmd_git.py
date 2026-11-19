@@ -598,18 +598,34 @@ def _git_is_trampoline(git_cmd: list) -> bool:
     return _probe_fork_bomb(git_cmd) is True
 
 
+_GIT_CORE_ARCHES = ("ucrt64", "clangarm64", "mingw64", "mingw32")
+
+
 def _portable_git_candidates() -> list:
     """PortableGit candidates: shared root first (where the managed tree actually lives, not the
     profile-scoped HERMES_HOME), then profile home as a fallback for custom layouts.
 
     The Hermes-managed PortableGit tree lives under the SHARED root (``<root>/git/...``), not the
     profile-scoped HERMES_HOME (``<root>/profiles/<name>``), so a profile-scoped ``hermes update`` must look
-    there (monerostar review, #87876).
+    there (monerostar review, #87876). PATH and PM metadata also locate newer
+    versioned tool-store installs without assuming their cache directory.
     """
     from hermes_constants import get_default_hermes_root, get_hermes_home
+    from hermes_platform.resolver import locate_command
+    from pm import installed_package
     candidates = []
     with suppress(Exception):
         candidates += [root / "git" / "mingw64" / "libexec" / "git-core" / "git.exe" for root in (get_default_hermes_root(), Path(get_hermes_home()))]
+        path_git = locate_command("git")
+        if path_git.found:
+            executable = Path(path_git.command[0])
+            if executable.parent.name.lower() in {"cmd", "bin"}:
+                candidates += [executable.parent.parent / arch / "libexec" / "git-core" / "git.exe"
+                               for arch in _GIT_CORE_ARCHES]
+        managed_git = installed_package("git")
+        if managed_git is not None:
+            candidates += [managed_git.path / arch / "libexec" / "git-core" / "git.exe"
+                           for arch in _GIT_CORE_ARCHES]
     return candidates
 
 
@@ -625,7 +641,7 @@ def _locate_real_git() -> Optional[Path]:
     candidates = [
         Path(base) / "Git" / arch / "libexec" / "git-core" / "git.exe"
         for base in (r"C:\Program Files", r"C:\Program Files (x86)")
-        for arch in ("clangarm64", "mingw64", "mingw32")
+        for arch in _GIT_CORE_ARCHES
     ] + _portable_git_candidates()
     return next((c for c in candidates if c.exists() and _probe_fork_bomb([str(c)]) is False), None)
 

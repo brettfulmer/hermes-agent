@@ -44,7 +44,7 @@ jobs:
     # every slice agrees on the split without a planning job.
     name: Run tests (${{ matrix.slice }}/3)
     runs-on: ${{ github.repository == 'brettfulmer/hermes-agent' && 'ubuntu-24.04' || 'blacksmith-32vcpu-ubuntu-2404' }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ github.repository == 'brettfulmer/hermes-agent' && 60 || 30 }}
     strategy:
       fail-fast: false
       matrix:

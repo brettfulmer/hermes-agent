@@ -15,13 +15,22 @@ checks, docs checks, Docker classification, and Nix classification/dependency
 hash/flake checks. Linux unit tests retain all three slices and the canonical
 `just test-all` entry point, with four workers in this fork instead of 32.
 Windows platform tests retain both architectures and ARM64 slices, with four
-workers instead of 16. Discovery, markers, API-key blanking, timeouts and the
+workers instead of 16. Discovery, markers, API-key blanking and the
 `All required checks pass (v2)` gate are unchanged. The pinned Blacksmith checkout
 action already falls back to standard checkout outside Blacksmith runners.
 
 Docker's upstream-only build/publish guards remain intact. Release-only and signed
 installer jobs, disabled desktop workflows, repository settings and protections
 are outside this fallback's scope. No paid runner registration is required.
+
+After the first standard-runner run (`44540373371`), fork Python-unit and JS jobs
+use a 60-minute budget: GitHub cancelled each at the original 30-minute cap, with
+Python slices at 93%, 98% and 74% completion. Fork JS workspace checks use the
+existing runner's `--concurrency 1` option to avoid competing nested worker pools
+on four cores; every discovered check still runs. Upstream retains its original
+30-minute budgets and `just check-js-ci` invocation. Per-test timeouts and all
+applicability and aggregate rules remain intact. The macOS ARM jobs were accepted
+but not assigned, with GitHub reporting hosted ARM runner capacity constraints.
 
 This directory has 57 workflow files. Most of them are **reusable workflows**
 (`on: workflow_call`). They never start on their own; an entry-point workflow
