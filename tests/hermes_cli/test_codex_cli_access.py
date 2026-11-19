@@ -200,3 +200,21 @@ def test_final_main_and_auxiliary_client_factories_refuse_foreign_destination(cl
         auxiliary_client._create_openai_client(api_key=token, base_url="https://other.example")
     with pytest.raises(AuthError, match="another provider"):
         codex_cli_access.validate_transport(api_key=token, base_url="https://other.example", provider="custom")
+
+
+def test_lock_only_route_remains_authoritative_without_an_explicit_requested_model(cli_source):
+    from types import SimpleNamespace
+    from gateway.platforms.api_server import APIServerAdapter
+    token = codex_cli_access.resolve()["api_key"]
+    actor = SimpleNamespace(_session_model_override_for=lambda key: None,
+        _recover_or_record_model=lambda model, kwargs, key: model,
+        _guard_model_provider_pair=lambda model, kwargs, **ignored: model)
+    def apply(kwargs, provider, **ignored):
+        kwargs.update(provider=provider, api_key=token, base_url=DEFAULT_CODEX_BASE_URL)
+        return True
+    actor._apply_provider_runtime = apply
+    runtime = {"provider": "openai-codex", "api_key": token, "base_url": DEFAULT_CODEX_BASE_URL}
+    result = APIServerAdapter._select_agent_runtime(actor, runtime, "gpt-6-sol",
+        requested_model=None, requested_provider=None, route={"provider": "openai-codex", "model": "gpt-6.2"},
+        session_model=None, confirmed_runtime_lock=True, gateway_session_key=None, session_id="fixture")
+    assert result[0] == "gpt-6.2"

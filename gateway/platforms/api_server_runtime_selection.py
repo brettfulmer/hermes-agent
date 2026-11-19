@@ -19,6 +19,11 @@ _apply_runtime_agent_overrides = partial(_origin_call, "_apply_runtime_agent_ove
 logger = _OriginLogger()
 
 
+def _route_after_lock(route, requested_model, confirmed):
+    # A lock-only caller may carry its selection in route; an explicit locked model wins.
+    return None if confirmed and requested_model else route
+
+
 def _select_agent_runtime(
     self, runtime_kwargs: dict[str, Any], model: str, *, requested_model: Optional[str],
     requested_provider: Optional[str], route: Optional[dict[str, Any]], session_model: Optional[str],
@@ -30,7 +35,7 @@ def _select_agent_runtime(
     Returns ``(model, session_override, request_model, request_provider)``."""
     request_model = _clean_request_string(requested_model)
     request_provider = _clean_request_string(requested_provider)
-    route = None if confirmed_runtime_lock else route
+    route = _route_after_lock(route, request_model, confirmed_runtime_lock)
     route_cfg = route if isinstance(route, dict) else {}
     route_model = _clean_request_string(route_cfg.get("model"))
     route_provider = _clean_request_string(route_cfg.get("provider"))
