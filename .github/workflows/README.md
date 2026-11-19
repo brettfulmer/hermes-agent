@@ -1,5 +1,28 @@
 # GitHub Actions workflows
 
+## Public-fork runners
+
+In `brettfulmer/hermes-agent`, ordinary PR validation uses standard GitHub-hosted
+runners because the fork has no Blacksmith runners. Repository-scoped expressions
+select `ubuntu-24.04`, `windows-2025` (x64), `windows-11-arm` (ARM64), and
+`macos-15` (Apple Silicon); other repositories retain their existing labels.
+[GitHub's runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+documents these standard labels and free use in public repositories.
+
+The fallback covers CI classification and aggregation, Python/OS tests, lint,
+repository guards, JS/Rust/catalog tests, remote backends, bootstrap installer
+checks, docs checks, Docker classification, and Nix classification/dependency
+hash/flake checks. Linux unit tests retain all three slices and the canonical
+`just test-all` entry point, with four workers in this fork instead of 32.
+Windows platform tests retain both architectures and ARM64 slices, with four
+workers instead of 16. Discovery, markers, API-key blanking, timeouts and the
+`All required checks pass (v2)` gate are unchanged. The pinned Blacksmith checkout
+action already falls back to standard checkout outside Blacksmith runners.
+
+Docker's upstream-only build/publish guards remain intact. Release-only and signed
+installer jobs, disabled desktop workflows, repository settings and protections
+are outside this fallback's scope. No paid runner registration is required.
+
 This directory has 57 workflow files. Most of them are **reusable workflows**
 (`on: workflow_call`). They never start on their own; an entry-point workflow
 calls them. This README covers what starts each workflow, which jobs it skips
