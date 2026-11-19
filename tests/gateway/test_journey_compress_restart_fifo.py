@@ -23,6 +23,12 @@ from tests.waiting import async_wait_until
 FOLLOWERS = ('FOLLOWER_1', 'FOLLOWER_2', 'FOLLOWER_3')
 
 
+def assert_compacted_history(messages, committed, summarised):
+    history = [(m['role'], m.get('content', '')) for m in messages if m['role'] != 'system']
+    assert history[:len(committed)] == committed, 'committed pre-restart prefix changed'
+    assert all(row not in history for row in summarised), 'summarised parent row resurrected'
+
+
 class CompactingModel(BaseHTTPRequestHandler):
     """Summarizes on the `summary` model; the first post-summary turn request parks until released."""
 
@@ -129,7 +135,9 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
                               provider='custom', base_url=url, toolsets=[], cwd=str(home)))['session_id']
             before['sid'] = sid
             for i in range(12):
-                params = dict(session_id=sid, input_id=f'pressure-{i}', text=f'PRESSURE_{i} ' + 'keep these facts ' * 100)
+                # Text is byte-stable across storage and the gateway's input trim.
+                text = (f'PRESSURE_{i} ' + 'keep these facts ' * 100).rstrip()
+                params = dict(session_id=sid, input_id=f'pressure-{i}', text=text)
                 accepted = await call(ws, 'prompt.submit', **params)
                 await wait_rows(lambda: peer.blocked.is_set() or any(
                     r['admission_id'] == accepted['admission_id'] and r['status'] == 'terminal' for r in admissions()))
@@ -158,6 +166,11 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
             await asyncio.to_thread(owner.wait, 60)
             before['stopped'] = {r['request_id']: (r['status'], r['outcome']) for r in admissions()}
             before['compacted'] = transcript(before['child'])
+            committed = [(role, content) for _, role, content in before['compacted']]
+            archived = rows('SELECT role,content FROM messages WHERE session_id=? ORDER BY id', (sid,))
+            before['summarised'] = [(r['role'], r['content']) for r in archived
+                                    if (r['role'], r['content']) not in committed]
+            assert before['summarised'], 'fixture must actually summarise parent rows'
             peer.release.set()
         assert all(executed(name) == 0 for name in FOLLOWERS), [r['text'] for r in peer.requests]
 
@@ -196,9 +209,14 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
         assert executed(compacting['text'][:12]) == before['compacting_requests'], 'compacted turn replayed'
         for name in FOLLOWERS:
             wire = next(r['wire'] for r in peer.requests if r['text'] == name)
-            # protect_first_n keeps PRESSURE_0 verbatim; the compacted middle is only inside the summary.
-            turns = [str(m.get('content', '')) for m in json.loads(wire)]
-            assert 'SUMMARY_RETAINED_FACTS' in wire and not any(t.startswith('PRESSURE_1 ') for t in turns), name
+            assert 'SUMMARY_RETAINED_FACTS' in wire, name
+            committed = [(role, content) for _, role, content in before['compacted']]
+            assert_compacted_history(json.loads(wire), committed, before['summarised'])
+        # A stale parent row appended after the correct prefix must still fail.
+        role, content = before['summarised'][0]
+        reinjected = [*json.loads(wire), {'role': role, 'content': content}]
+        with pytest.raises(AssertionError, match='summarised parent row resurrected'):
+            assert_compacted_history(reinjected, committed, before['summarised'])
         settled = admissions()
         assert {r['target_session_id'] for r in settled} == {sid}
         assert [r['request_id'] for r in settled][-3:] == list(FOLLOWERS)

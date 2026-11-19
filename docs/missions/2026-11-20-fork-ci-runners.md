@@ -71,3 +71,23 @@ journey reproduces both failures on baseline `eaac327fac2c`, at the same
 open; no gateway behaviour was changed. Independent review returned SHIP. The
 17-check run passed 15 checks but two exhausted host memory; both failed checks
 passed on isolated canonical reruns. Publication and new remote checks remain pending.
+
+## Approved test-boundary correction
+
+Root approved a test-only correction after the Linux journey probe showed that
+`PRESSURE_1` already belonged to the committed protected tail before restart.
+The replacement must compare each follower's wire history with the actual
+pre-restart committed prefix, prohibit resurrection of the nonempty set of
+actually summarised parent rows, and prove that deliberately reinjecting one
+such row fails. FIFO, exactly-once, admission identity, lineage, and single-summary
+assertions remain unchanged. Compression policy and gateway runtime are out of scope.
+
+The corrected test passes both graceful/crash cases on native Linux in the isolated
+WSL test environment (19.6 seconds). Each case also verifies that appending a real
+summarised parent row to an otherwise valid follower history raises the resurrection
+assertion. Synthetic pressure input has no incidental trailing space, making its
+stored and wire text byte-identical under the gateway's existing input trim.
+The old assertion failed on both baseline and published head because `PRESSURE_1`
+was already in the committed protected tail, not resurrected by restart.
+Independent read-only review returned SHIP and reproduced both passing Linux cases;
+all 17 staged checks passed together with zero code-health findings.
