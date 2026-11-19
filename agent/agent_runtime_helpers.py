@@ -1955,6 +1955,9 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     # that specific path; this copy locks the contract so future transport/keepalive work can't reintroduce
     # the same class of bug.
     client_kwargs = dict(client_kwargs)
+    from hermes_cli import codex_cli_access
+    codex_cli_access.validate_transport(api_key=client_kwargs.get("api_key"), base_url=client_kwargs.get("base_url"),
+                                        provider=getattr(agent, "provider", None))
     if client_kwargs.get("base_url"):
         client_kwargs["base_url"] = _to_openai_base_url(client_kwargs["base_url"])
     try:

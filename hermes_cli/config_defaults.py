@@ -22,6 +22,8 @@ DEFAULT_CONFIG = {
     "model": "",
     "providers": {},
     "fallback_providers": [],
+    # Explicit profile opt-in; the CLI remains the sole owner of its refresh grant.
+    "codex_oauth": {"credential_source": "hermes"},
     # min_switch_reset_seconds: opt-in (0 = off). When a rate-limited primary declares a reset
     # sooner than this many seconds, stay on it (the retry backoff rides out the window) instead
     # of switching the turn to a fallback model.

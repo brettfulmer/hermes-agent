@@ -540,6 +540,10 @@ def _resolve_codex_usage_credentials(
 ) -> tuple[str, str, Optional[str]]:
     """Codex quota credentials: explicit live-agent creds → native runtime resolver (itself pool-aware) → direct
     pool select. Native OAuth stores device-code logins in the pool, so the singleton store alone is not enough."""
+    from hermes_cli import codex_cli_access
+    if codex_cli_access.selected():
+        creds = codex_cli_access.for_existing_access(str(api_key or "").strip(), base_url=base_url)
+        return creds["api_key"], creds["base_url"], creds["account_id"]
     explicit_key = str(api_key or "").strip()
     if explicit_key and not force_refresh:
         return explicit_key, str(base_url or "").strip(), None

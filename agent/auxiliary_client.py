@@ -190,6 +190,8 @@ def _openai_http_client_kwargs(base_url: Optional[str], *, async_mode: bool = Fa
 
 
 def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
+    from hermes_cli import codex_cli_access
+    codex_cli_access.validate_transport(api_key=api_key, base_url=base_url)
     if _aux_probe_active():
         # Availability probe: resolved credentials/base_url are the answer.
         return _AuxProbeClientStub(api_key=api_key, base_url=base_url)
@@ -2112,6 +2114,10 @@ def _resolve_codex_credential_and_base(model: Optional[str] = None) -> tuple[Opt
     it belongs to (#121486): the profile-scoped ``HERMES_CODEX_BASE_URL`` wins; otherwise a pooled
     key goes where that pool entry routes (row URL / ``model.base_url``) and the auth.json OAuth
     token goes to the ChatGPT default. ``(None, <base>)`` without a usable token."""
+    from hermes_cli import codex_cli_access
+    if codex_cli_access.selected():
+        creds = codex_cli_access.resolve()
+        return creds["api_key"], creds["base_url"]
     override = _codex_base_url_override()
     pool_present, entry = _select_pool_entry("openai-codex", model)  # a model-scoped cooldown spares siblings
     if pool_present:

@@ -2164,6 +2164,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 runtime_kwargs["provider"] = effective_provider
             model = effective_model
             # Per-route explicit transport secrets/base URLs win after provider resolution.
+            from hermes_cli import codex_cli_access
+            if runtime_kwargs.get("provider") == "openai-codex" and codex_cli_access.selected():
+                codex_cli_access.resolve(explicit_api_key=route_cfg.get("api_key"), explicit_base_url=route_cfg.get("base_url"))
             for key in ("api_key", "base_url"):
                 value = _clean_request_string(route_cfg.get(key))
                 if value:
