@@ -32,6 +32,21 @@ on four cores; every discovered check still runs. Upstream retains its original
 applicability and aggregate rules remain intact. The macOS ARM jobs were accepted
 but not assigned, with GitHub reporting hosted ARM runner capacity constraints.
 
+## This public fork
+
+`brettfulmer/hermes-agent` uses ordinary PR validation, not upstream publishing
+or repository-writing automation. Fork-specific job conditions prevent canary
+tagging/pruning, input archival, JS auto-fix branches/PRs, Vercel deployment,
+skills-index deployment and standalone scheduled OSV runs. Upstream and other
+repositories keep their original conditions. No trigger, runner, permission,
+secret or ordinary PR test lane changes as part of these exclusions.
+
+GitHub's repository-wide fork-workflow restoration also affects default-branch
+schedules. These guards must be present on this fork's default branch before
+restoring Actions; guards present only in a candidate PR do not protect main.
+Existing upstream-only Pages, Docker/sandbox publishing, live-provider canaries,
+docs search and skills freshness/index builds remain guarded as before.
+
 This directory has 57 workflow files. Most of them are **reusable workflows**
 (`on: workflow_call`). They never start on their own; an entry-point workflow
 calls them. This README covers what starts each workflow, which jobs it skips
