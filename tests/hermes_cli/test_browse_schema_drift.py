@@ -605,6 +605,41 @@ def test_slow_browse_reconcile_gives_up_inside_its_budget_and_boot_waits_it_out(
     assert "last_read_at" not in _session_columns(path)
 
 
+@pytest.mark.parametrize('expired', [False, True], ids=['ordinary-error', 'budget-expired'])
+def test_begin_error_obeys_budget_and_preserves_store(tmp_path, monkeypatch, expired):
+    import hermes_cli.sqlite_safe_read as safe_read
+    import hermes_state_reconcile as reconcile
+
+    path = _lagging_store_with_history(_profile_home(tmp_path), rows=2)
+    before = _file_state(path)
+    budget = reconcile._Budget(reconcile.BROWSE_RECONCILE_BUDGET_S)
+    original = safe_read.connect_tracked
+    error = sqlite3.OperationalError('interrupted' if expired else 'database is locked')
+
+    class BeginErrorConnection:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+        def execute(self, statement, *args):
+            if statement == 'BEGIN IMMEDIATE':
+                budget.expired = expired
+                raise error
+            return self.conn.execute(statement, *args)
+
+    monkeypatch.setattr(safe_read, 'connect_tracked',
+                        lambda *args, **kwargs: BeginErrorConnection(original(*args, **kwargs)))
+    expected = reconcile.BrowseBudgetExceeded if expired else sqlite3.OperationalError
+    with pytest.raises(expected) as caught:
+        reconcile._apply_additive_schema(path, budget)
+    if not expired:
+        assert caught.value is error
+    assert _file_state(path) == before
+    assert 'last_read_at' not in _session_columns(path)
+
+
 def test_equal_cardinality_corrupt_index_plus_drift_is_not_written(tmp_path):
     """R2-3: quick_check does not compare index keys with the table, so two equal-size indexes
     with swapped root pages pass it. Browse must still refuse as corrupt and write nothing."""

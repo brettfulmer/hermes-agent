@@ -91,3 +91,21 @@ The old assertion failed on both baseline and published head because `PRESSURE_1
 was already in the committed protected tail, not resurrected by restart.
 Independent read-only review returned SHIP and reproduced both passing Linux cases;
 all 17 staged checks passed together with zero code-health findings.
+
+## Final macOS budget boundary
+
+On published head `9e5d0c5306`, every long Linux/Windows/JS lane passed; macOS
+slice 1 exposed an interrupted `BEGIN IMMEDIATE` outside the browse catch-up's
+existing transaction error guard. Root approved moving that statement into the
+guard and deterministic expired/non-expired interruption tests. Expired work must
+raise `BrowseBudgetExceeded` with no store changes; ordinary SQLite errors retain
+their original type. Prove the expired case red first, keep rollback semantics,
+and require independent review, local gates and real macOS/aggregate results.
+
+The deterministic test on the unchanged helper passed its ordinary-error control
+and failed the expired-BEGIN case with an escaped SQLite error. Moving BEGIN into
+the existing guard makes the full suite pass on Windows (20 passed, 11 host skips)
+and native Linux (31 passed). Both regression cases verify unchanged store bytes
+and schema; the ordinary error retains its identity. There is no migration or
+installed-runtime change. Independent review returned SHIP and reproduced the
+Windows result; all 17 staged checks passed together. Final remote evidence is pending.

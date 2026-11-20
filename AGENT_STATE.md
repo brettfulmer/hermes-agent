@@ -1,5 +1,15 @@
 # Active bounded integration
 
+Latest CI checkpoint: public PR head `9e5d0c5306` passed every long Linux, Windows,
+and JS lane; macOS slice 1 exposed the budget-expired BEGIN error classification
+and the aggregate correctly failed. The current focused repair moves BEGIN inside
+the existing transaction guard. The new expired-case regression was proven red;
+the ordinary-error case preserves the original exception. After the fix, native
+Windows schema-browse tests pass 20 with 11 host skips, and Linux passes all 31.
+No installed runtime or live database was changed. Independent review returned SHIP,
+and all 17 staged checks passed together. Exact-commit checks and a new real
+macOS/aggregate verdict are required before merge.
+
 Active CI repair: [Public-fork CI runners](docs/missions/2026-11-20-fork-ci-runners.md).
 Work is isolated to ordinary PR workflow runner compatibility; independent review
 cleared the candidate. All 17 staged blocking checks pass, job-graph tests pass 2/2,
