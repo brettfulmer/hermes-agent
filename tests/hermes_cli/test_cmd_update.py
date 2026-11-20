@@ -127,3 +127,32 @@ class TestGitTrampolineSelfHeal:
         assert candidates[1] == (
             profile_home / "git" / "mingw64" / "libexec" / "git-core" / "git.exe"
         )
+
+    def test_portable_git_candidates_include_pm_selected_package(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        import pm
+        from hermes_cli.update_cmd_git import _portable_git_candidates
+
+        managed = tmp_path / "pm-store" / "selected-git"
+        monkeypatch.setattr(pm, "installed_package", lambda name: SimpleNamespace(path=managed))
+
+        candidates = _portable_git_candidates()
+        assert managed / "mingw64" / "libexec" / "git-core" / "git.exe" in candidates
+        assert managed / "clangarm64" / "libexec" / "git-core" / "git.exe" in candidates
+
+    def test_portable_git_candidates_follow_path_when_pm_facts_are_absent(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        import pm
+        from hermes_platform import resolver
+        from hermes_cli import update_cmd_git
+
+        managed = tmp_path / "pm-store" / "selected-git"
+        monkeypatch.setattr(pm, "installed_package", lambda name: None)
+        monkeypatch.setattr(resolver, "locate_command", lambda name: SimpleNamespace(
+            found=True, command=(str(managed / "cmd" / "git.exe"),)))
+        real = managed / "ucrt64" / "libexec" / "git-core" / "git.exe"
+        real.parent.mkdir(parents=True)
+        real.touch()
+        monkeypatch.setattr(update_cmd_git, "_probe_fork_bomb", lambda command: command != [str(real)])
+
+        assert update_cmd_git._locate_real_git() == real

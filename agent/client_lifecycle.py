@@ -578,6 +578,16 @@ class ClientLifecycleMixin:
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
         if self.api_mode != "codex_responses" or self.provider not in {"openai-codex", "xai-oauth"}:
             return False
+        from hermes_cli import codex_cli_access
+        if self.provider == "openai-codex" and codex_cli_access.selected():
+            from hermes_cli.auth_constants import AuthError
+            try:
+                creds = codex_cli_access.for_existing_access(str(self.api_key or ""), base_url=self.base_url)
+            except AuthError:
+                return False
+            if creds["api_key"] == self.api_key:
+                return False
+            return self._adopt_openai_credentials(creds["api_key"], creds["base_url"], reason="codex_cli_access_updated")
         # No silent account swap: a non-singleton credential (manual pool entry, explicit api_key=) must not be
         # replaced by the device_code singleton's tokens — the pool's reactive recovery owns that case.
         try:

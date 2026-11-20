@@ -174,7 +174,12 @@ def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatc
 
     def assign(job, proc):
         children.append(proc)
-        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED
+        from tests.waiting import wait_until
+
+        # A newly created suspended process can briefly report running while
+        # Windows publishes its initial thread state, particularly on ARM64.
+        wait_until(lambda: psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED,
+                   what="new child to report its suspended state before assignment")
         assert not marker.exists()
         # Query the actual kernel object, not implementation source/constants.
         limits = processes._ExtendedLimits()

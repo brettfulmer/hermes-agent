@@ -20,7 +20,7 @@ CREATE_FIELDS = frozenset({'request_id', 'source', 'cwd', 'model', 'toolsets',
                            'client'})
 # Sections a ``follow_profile_config`` session re-reads from the owning profile's CURRENT config each
 # turn (main's Bot Chat row), credentials included: a frozen key never crosses a profile route change.
-FOLLOW_MODEL_SECTIONS = ('model', 'providers', 'custom_providers', 'fallback_providers', 'fallback_model', 'model_aliases')
+FOLLOW_MODEL_SECTIONS = ('model', 'providers', 'custom_providers', 'fallback_providers', 'fallback_model', 'model_aliases', 'codex_oauth')
 FOLLOW_SECTIONS = (*FOLLOW_MODEL_SECTIONS, 'platform_toolsets')
 # A Bot Chat an earlier build committed frozen follows its profile once a client opens it (``follow_bot_chat``).
 # The marker sits in the policy's own config, so no other receipt changes shape (an older owner restores
